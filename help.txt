@@ -1,7 +1,3 @@
-# znx
-
-Atomic and differential updates for Linux distributions.
-
 Usage: znx command args
 
 Available commands are:
