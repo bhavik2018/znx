@@ -1,0 +1,219 @@
+#! /bin/sh
+
+# Exit on errors.
+
+set -e
+
+HELP="
+Usage: $0 command args
+
+Available commands are:
+
+- init [DEVICE]
+  Configures an initial setup on the disk. This
+  should be done before attempting to run any
+  other operation.
+
+- install [PATH:NAME | URL:NAME]:
+  Installs a new ISO file to the /os directory.
+  Multiple paths or URLs can be specified.
+  Each image must me assigned a name. If no name
+  is specified, the operation is aborted. Name it
+  in a way that makes sense to you.
+
+- update [NAME]:
+  Update an already installed image.
+
+- remove [NAME]:
+  Deletes an existing image.
+
+"
+
+# Default configuration.
+
+GRUB_MODULES="
+boot
+linux
+normal
+configfile
+part_gpt
+fat
+ext2
+btrfs
+iso9660
+udf
+test
+keystatus
+loopback
+regexp
+probe
+efi_gop
+efi_uga
+all_video
+gfxterm
+font
+echo
+read
+help
+ls
+cat
+halt
+reboot
+"
+
+GRUB_MODULES=$(echo $GRUB_MODULES | tr '\n' ' ')
+
+
+# A bunch of handy functions.
+
+error () {
+	echo "\e[31m$@\e[0m" 1>&2
+	exit 1
+}
+
+help () {
+	error $HELP
+}
+
+confirm () {
+	echo -n "$@ (y/n) "
+	read -n 1 ANSWER
+	echo
+
+	if [ $ANSWER == "y" ]; then
+		return 0
+	else
+		return 1
+	fi
+}
+
+
+# LET THE FUN START.
+
+[ $# -lt 1 ] && error "No command given!"
+[ $(id -u) -ne 0 ] && error "You are not the super user."
+
+if [ $(pgrep znx | wc -l) -gt 1 ]; then
+	error "znx is already running. Can't continue."
+fi
+
+COMMAND=$1
+shift
+
+case $COMMAND in
+
+#	Prepare the disk and the bootloader image.
+
+	init)
+
+		ZNX_DIR=/tmp/znx
+		mkdir -p $ZNX_DIR
+
+		[ $# -lt 1 ] && error "No device name given!"
+		[ $# -gt 2 ] && error "Bad command."
+		[ ! -b $1 ] && error "Not a block device. Aborting."
+
+		DEV=$(echo $1 | sed 's/[0-9]//g')
+
+		if grep -q $DEV /proc/mounts; then
+			error "Device is mounted! Umount it before continuing."
+		fi
+
+		if ! confirm "ALL DATA ON $DEV WILL BE DESTROYED! CONTINUE?"; then
+			error "Operation aborted by user. Leaving disks untouched."
+		fi
+
+		sgdisk --zap-all $DEV
+		sgdisk --new=1:0:50M --typecode 1:EF00 --change-name 1:ZNX_BOOT $DEV
+		sgdisk --largest-new=2 --typecode 2:8300 --change-name 2:ZNX_DATA $DEV
+
+		BOOT=$(findfs PARTLABEL=ZNX_BOOT)
+		DATA=$(findfs PARTLABEL=ZNX_DATA)
+
+		# Currently supported filesystems are ext4 and btrfs.
+		FS_TYPE=ext4
+		mkfs.vfat -F 32 $BOOT
+		mkfs.$FS_TYPE $DATA
+
+
+		if mount -t vfat $BOOT $ZNX_DIR; then
+			trap "umount -f $ZNX_DIR" SIGINT SIGHUP SIGKILL SIGTERM
+		else
+			error "Unable to mount $BOOT! Exiting now."
+		fi
+
+		mkdir -p $ZNX_DIR/efi/boot
+		mkdir -p $ZNX_DIR/boot/grub/entries
+
+		grub-mkimage -o $ZNX_DIR/efi/boot/bootx64.efi -O x86_64-efi -p /boot/grub $GRUB_MODULES
+		cp grub/grub.cfg $ZNX_DIR/boot/grub/grub.cfg
+
+		umount -f $ZNX_DIR
+
+		if mount -t $FS_TYPE $DATA $ZNX_DIR; then
+			trap "umount -f $ZNX_DIR" SIGINT SIGHUP SIGKILL SIGTERM
+		else
+			error "Unable to mount $DATA! Exiting now."
+		fi
+
+		mkdir -p $ZNX_DIR/os
+		mkdir -p $ZNX_DIR/apps
+		mkdir -p $ZNX_DIR/data
+
+		umount -f $ZNX_DIR
+
+		echo "Operation successful. Device is ready."
+
+		;;
+
+	add)
+
+		[ $# -ne 2 ] && error "Bad command."
+
+		CLASS=$1
+		URL=$2
+		NAME=$(basename $URL | sed 's/\.zsync//')
+
+		if ! mountpoint /os; then
+			error "/os not mounted!"
+		fi
+
+		mkdir -p /os/$CLASS
+
+		if echo $URL | grep '\.zsync$'; then
+			DOWNLOADER="zsync -o /os/$CLASS/$NAME"
+
+			for FILE in find /os/$CLASS/*; do
+				DOWNLOADER="$DOWNLOADER -i $FILE"
+			done
+		else
+			DOWNLOADER="wget -q --show-progress"
+		fi
+
+		if ! eval $DOWNLOADER $URL; then
+			rm -r /os/$CLASS/$NAME
+			error "Download failed!"
+		fi
+
+		echo "Successfully installed $NAME."
+
+		;;
+
+	update)
+
+		:
+
+		;;
+
+	remove)
+
+		:
+
+		;;
+
+	help) help;;
+
+	*) error "No such command $COMMAND";;
+esac
+
+rm -r $ZNX_DIR

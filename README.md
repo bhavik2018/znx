@@ -1,2 +1,3 @@
 # znx
-Atomic and differential updates for nglx.
+
+Atomic and differential updates for Linux distributions.
