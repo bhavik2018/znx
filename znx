@@ -4,7 +4,7 @@
 
 set -e
 
-# Default configuration.
+# Modules to include in the GRUB2 boot image.
 
 GRUB_MODULES="
 boot
@@ -22,6 +22,7 @@ keystatus
 loopback
 regexp
 probe
+search
 efi_gop
 efi_uga
 all_video
@@ -42,20 +43,53 @@ GRUB_MODULES=$(echo $GRUB_MODULES | tr '\n' ' ')
 # A bunch of handy functions.
 
 error () {
-	echo "\e[31m$@\e[0m" 1>&2
+	echo "\e[31m$@\e[0m" 1>& 2
 	exit 1
 }
 
+abort () {
+	echo "$@"
+	exit 0
+}
+
+
+HELP="
+Usage: znx [no-confirm] command args
+
+Available commands are:
+
+- init DEVICE:
+  Configures an initial setup on the disk. This should be
+  done before attempting any other operation.
+
+- install IMAGE_CODENAME [ URL | PATH ]:
+  Installs a new ISO file to the /boot_images directory of
+  the specified device. The device must have been
+  initialized.
+  Each image must me assigned a name. If no name
+  is specified, the operation is aborted. Name it
+  in a way that makes sense to you.
+
+You can, optionally, pass the 'no-confirm' option (as the
+first argument) to make znx accept every default option.
+This is useful when calling from another script or when
+not running interactively.
+"
+
 help () {
-	cat help.txt
+	echo "$HELP"
 }
 
 confirm () {
-	echo -n "$@ (y/n) "
-	read -n 1 ANSWER
-	echo
+	if [ "$NOCONFIRM" == "SET" ]; then
+		ANSWER=y
+	else
+		echo -n "$@ (y/n) "
+		read -n 1 ANSWER
+		echo
+	fi
 
-	if [ $ANSWER == "y" ]; then
+	if [ "$ANSWER" == "y" ]; then
 		return 0
 	else
 		return 1
@@ -63,7 +97,7 @@ confirm () {
 }
 
 
-# LET THE FUN START.
+# == MAIN.
 
 [ $# -lt 1 ] && error "No command given!"
 [ $(id -u) -ne 0 ] && error "You are not the super user."
@@ -72,12 +106,16 @@ if [ $(pgrep znx | wc -l) -gt 1 ]; then
 	error "znx is already running. Can't continue."
 fi
 
+if [ "$1" == "no-confirm" ]; then
+	NOCONFIRM=SET
+	QUIET=SET
+	shift
+fi
+
 COMMAND=$1
 shift
 
 case $COMMAND in
-
-#	Prepare the disk and the bootloader image.
 
 	init)
 
@@ -85,53 +123,52 @@ case $COMMAND in
 		mkdir -p $ZNX_DIR
 
 		[ $# -lt 1 ] && error "No device name given!"
-		[ $# -gt 2 ] && error "Bad command."
+		[ $# -gt 2 ] && error "Bad command: wrong number of arguments."
 		[ ! -b $1 ] && error "Not a block device. Aborting."
 
 		DEV=$(echo $1 | sed 's/[0-9]//g')
 
-		if grep -q $DEV /proc/mounts; then
-			error "Device is mounted! Umount it before continuing."
+		if mount | grep -q $DEV; then
+			error "Device is mounted! Unmount it before continuing."
 		fi
 
 		if ! confirm "ALL DATA ON $DEV WILL BE DESTROYED! CONTINUE?"; then
-			error "Operation aborted by user. Leaving disks untouched."
+			abort "Operation aborted by user. Leaving unit $DEV untouched."
 		fi
 
-		sgdisk --zap-all $DEV
-		sgdisk --new=1:0:50M --typecode 1:EF00 --change-name 1:ZNX_BOOT $DEV
+		dd if=/dev/zero bs=4096 count=16 of=$DEV
+		sgdisk --zap-all $DEV || true
+		sgdisk --new=1:0:64M --typecode 1:EF00 --change-name 1:ZNX_BOOT $DEV
 		sgdisk --largest-new=2 --typecode 2:8300 --change-name 2:ZNX_DATA $DEV
 
 		BOOT=$(findfs PARTLABEL=ZNX_BOOT)
 		DATA=$(findfs PARTLABEL=ZNX_DATA)
 
-		# Currently supported filesystems are ext4 and btrfs.
-		FS_TYPE=ext4
-		mkfs.vfat -F 32 $BOOT
-		mkfs.$FS_TYPE $DATA
-
+		mkfs.vfat -F 32 -S 512 $BOOT
+		mkfs.btrfs -qf $DATA
 
 		if mount -t vfat $BOOT $ZNX_DIR; then
-			trap "umount -f $ZNX_DIR" SIGINT SIGHUP SIGKILL SIGTERM
+			trap "umount -f $ZNX_DIR" EXIT HUP INT TERM
 		else
-			error "Unable to mount $BOOT! Exiting now."
+			error "Unable to mount $BOOT! Can't continue."
 		fi
 
 		mkdir -p $ZNX_DIR/efi/boot
-		mkdir -p $ZNX_DIR/boot/grub/entries
+		mkdir -p $ZNX_DIR/boot
 
 		grub-mkimage -o $ZNX_DIR/efi/boot/bootx64.efi -O x86_64-efi -p /boot/grub $GRUB_MODULES
-		cp grub/grub.cfg $ZNX_DIR/boot/grub/grub.cfg
+
+		cp -r grub $ZNX_DIR/boot
 
 		umount -f $ZNX_DIR
 
-		if mount -t $FS_TYPE $DATA $ZNX_DIR; then
-			trap "umount -f $ZNX_DIR" SIGINT SIGHUP SIGKILL SIGTERM
+		if mount $DATA $ZNX_DIR; then
+			trap "umount -f $ZNX_DIR" EXIT HUP INT TERM
 		else
 			error "Unable to mount $DATA! Exiting now."
 		fi
 
-		mkdir -p $ZNX_DIR/os
+		mkdir -p $ZNX_DIR/boot_images
 		mkdir -p $ZNX_DIR/apps
 		mkdir -p $ZNX_DIR/data
 
@@ -139,54 +176,79 @@ case $COMMAND in
 
 		echo "Operation successful. Device is ready."
 
-		;;
+	;;
 
-	add)
+	install)
 
-		[ $# -ne 2 ] && error "Bad command."
+		[ $# -ne 2 ] && error "Bad command: wrong number of arguments."
 
-		CLASS=$1
-		URL=$2
-		NAME=$(basename $URL | sed 's/\.zsync//')
+		NAME=$1
+		TARGET=$2
+		FILE=$(basename $TARGET)
 
-		if ! mountpoint /os; then
-			error "/os not mounted!"
-		fi
+		DATA=$(findfs PARTLABEL=ZNX_DATA)
 
-		mkdir -p /os/$CLASS
+		ZNX_DIR=/tmp/znx
+		mkdir -p $ZNX_DIR
 
-		if echo $URL | grep '\.zsync$'; then
-			DOWNLOADER="zsync -o /os/$CLASS/$NAME"
-
-			for FILE in find /os/$CLASS/*; do
-				DOWNLOADER="$DOWNLOADER -i $FILE"
-			done
+		if grep -q $DATA /proc/mounts; then
+			if mount -o bind $(grep $DATA /proc/mounts | cut -d ' ' -f 2) $ZNX_DIR; then
+				trap "umount -f $ZNX_DIR" EXIT HUP INT TERM
+			fi
 		else
-			DOWNLOADER="wget -q --show-progress"
+			if mount $DATA $ZNX_DIR; then
+				trap "umount -f $ZNX_DIR" EXIT HUP INT TERM
+			fi
 		fi
 
-		if ! eval $DOWNLOADER $URL; then
-			rm -r /os/$CLASS/$NAME
-			error "Download failed!"
+		INSTALL_DIR=$ZNX_DIR/boot_images/$NAME
+		mkdir -p $INSTALL_DIR
+
+		if [ -f $INSTALL_DIR/$FILE ]; then
+			if ! confirm "File $FILE is already installed. Do you want to overwrite it?"; then
+				abort "User aborted installation."
+			fi
+		fi
+
+		if [ -f $TARGET ]; then
+			cp $TARGET $INSTALL_DIR
+		else
+			cd $INSTALL_DIR
+			zsync $TARGET
+			cd -
 		fi
 
 		echo "Successfully installed $NAME."
 
-		;;
+	;;
 
 	update)
 
 		:
 
-		;;
+	;;
+
+	list)
+
+		:
+
+	;;
 
 	remove)
 
 		:
 
-		;;
+	;;
 
-	help) help;;
+	help)
 
-	*) error "No such command $COMMAND";;
+		help
+
+	;;
+
+	*)
+
+		error "No such command $COMMAND"
+
+	;;
 esac
