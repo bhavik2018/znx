@@ -69,6 +69,8 @@ Available commands are:
   Each image must me assigned a name. If no name
   is specified, the operation is aborted. Name it
   in a way that makes sense to you.
+  The image name only accepts alphanumeric characters,
+  hyphens and underscores, and, a single slash.
 
 You can, optionally, pass the 'no-confirm' option (as the
 first argument) to make znx accept every default option.
@@ -185,6 +187,10 @@ case $COMMAND in
 		NAME=$1
 		TARGET=$2
 		FILE=$(basename $TARGET)
+
+		if echo $NAME | grep -qE '^[[:alnum:]_-]+/[[:alnum:]_-]+$'; then
+			error "NAME must be in the form: '^[[:alnum:]_-]+/[[:alnum:]_-]+$'."
+		fi
 
 		DATA=$(findfs PARTLABEL=ZNX_DATA)
 
