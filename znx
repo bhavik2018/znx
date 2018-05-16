@@ -188,7 +188,7 @@ case $COMMAND in
 		TARGET=$2
 		FILE=$(basename $TARGET)
 
-		if echo $NAME | grep -qE '^[[:alnum:]_-]+/[[:alnum:]_-]+$'; then
+		if ! echo $NAME | grep -qE '^[[:alnum:]_-]+/[[:alnum:]_-]+$'; then
 			error "NAME must be in the form: '^[[:alnum:]_-]+/[[:alnum:]_-]+$'."
 		fi
 
@@ -236,7 +236,32 @@ case $COMMAND in
 
 	list)
 
-		:
+		NAME=$1
+
+		DATA=$(findfs PARTLABEL=ZNX_DATA)
+
+		ZNX_DIR=/tmp/znx
+		mkdir -p $ZNX_DIR
+
+		if grep -q $DATA /proc/mounts; then
+			if mount -o bind $(grep $DATA /proc/mounts | cut -d ' ' -f 2) $ZNX_DIR; then
+				trap "umount -f $ZNX_DIR" EXIT HUP INT TERM
+			fi
+		else
+			if mount $DATA $ZNX_DIR; then
+				trap "umount -f $ZNX_DIR" EXIT HUP INT TERM
+			fi
+		fi
+
+		if ! echo $NAME | grep -qE '^[[:alnum:]_-]*$|^$'; then
+			error "Bad pattern passed."
+		fi
+
+		cd $ZNX_DIR
+		for d in ${NAME:-*/*}; do
+			ls $d
+		done
+		cd -
 
 	;;
 
