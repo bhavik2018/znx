@@ -4,46 +4,10 @@
 
 set -e
 
-# Modules to include in the GRUB2 boot image.
-
-GRUB_MODULES="
-boot
-linux
-normal
-configfile
-part_gpt
-fat
-ext2
-btrfs
-iso9660
-udf
-test
-keystatus
-loopback
-regexp
-probe
-search
-efi_gop
-efi_uga
-all_video
-gfxterm
-font
-echo
-read
-help
-ls
-cat
-halt
-reboot
-"
-
-GRUB_MODULES=$(echo $GRUB_MODULES | tr '\n' ' ')
-
-
 # A bunch of handy functions.
 
 error () {
-	echo "\e[31m$@\e[0m" 1>& 2
+	echo "\e[31mError:\e[0m $@" 1 >& 2
 	exit 1
 }
 
@@ -51,32 +15,6 @@ abort () {
 	echo "$@"
 	exit 0
 }
-
-
-HELP="
-Usage: znx [no-confirm] command args
-
-Available commands are:
-
-- init DEVICE:
-  Configures an initial setup on the disk. This should be
-  done before attempting any other operation.
-
-- install IMAGE_CODENAME [ URL | PATH ]:
-  Installs a new ISO file to the /boot_images directory of
-  the specified device. The device must have been
-  initialized.
-  Each image must me assigned a name. If no name
-  is specified, the operation is aborted. Name it
-  in a way that makes sense to you.
-  The image name only accepts alphanumeric characters,
-  hyphens and underscores, and, a single slash.
-
-You can, optionally, pass the 'no-confirm' option (as the
-first argument) to make znx accept every default option.
-This is useful when calling from another script or when
-not running interactively.
-"
 
 help () {
 	echo "$HELP"
@@ -99,13 +37,43 @@ confirm () {
 }
 
 
+HELP="
+Usage: znx [no-confirm] command args
+
+Available commands are:
+
+- init DEVICE:
+  Configures an initial setup on the disk. This should be
+  done before attempting any other operation.
+
+- install IMAGE_CODENAME [ URL | PATH ]:
+  Installs a new ISO file to the /boot_images directory of
+  the specified device. The device must have been
+  initialized.
+  Each image must me assigned a name. If no name
+  is specified, the operation is aborted. Name it
+  in a way that makes sense to you.
+  The image name only accepts alphanumeric characters,
+  hyphens and underscores, and, a single slash.
+
+- rollback IMAGE_CODENAME:
+  Revert the specified image to the previous state.
+
+- clean IMGAE_CODENAME:
+  Remove all the historical images. Keep just the latest.
+
+You can, optionally, pass the 'no-confirm' option (as the
+first argument) to make znx accept every default option.
+This is useful when calling from another script or when
+not running interactively."
+
 # == MAIN.
 
 [ $# -lt 1 ] && error "No command given!"
 [ $(id -u) -ne 0 ] && error "You are not the super user."
 
-if [ $(pgrep znx | wc -l) -gt 1 ]; then
-	error "znx is already running. Can't continue."
+if [ $(pgrep -c znx) -gt 1 ]; then
+	error "znx is already running. Aborting."
 fi
 
 if [ "$1" == "no-confirm" ]; then
@@ -138,7 +106,7 @@ case $COMMAND in
 			abort "Operation aborted by user. Leaving unit $DEV untouched."
 		fi
 
-		dd if=/dev/zero bs=4096 count=16 of=$DEV
+		dd if=/dev/zero bs=4096 count=4 of=$DEV
 		sgdisk --zap-all $DEV || true
 		sgdisk --new=1:0:64M --typecode 1:EF00 --change-name 1:ZNX_BOOT $DEV
 		sgdisk --largest-new=2 --typecode 2:8300 --change-name 2:ZNX_DATA $DEV
@@ -146,10 +114,10 @@ case $COMMAND in
 		BOOT=$(findfs PARTLABEL=ZNX_BOOT)
 		DATA=$(findfs PARTLABEL=ZNX_DATA)
 
-		mkfs.vfat -F 32 -S 512 $BOOT
+		mkfs.vfat $BOOT
 		mkfs.btrfs -qf $DATA
 
-		if mount -t vfat $BOOT $ZNX_DIR; then
+		if mount $BOOT $ZNX_DIR; then
 			trap "umount -f $ZNX_DIR" EXIT HUP INT TERM
 		else
 			error "Unable to mount $BOOT! Can't continue."
@@ -158,7 +126,12 @@ case $COMMAND in
 		mkdir -p $ZNX_DIR/efi/boot
 		mkdir -p $ZNX_DIR/boot
 
-		grub-mkimage -o $ZNX_DIR/efi/boot/bootx64.efi -O x86_64-efi -p /boot/grub $GRUB_MODULES
+		grub-mkimage -C xz -O x86_64-efi -o $ZNX_DIR/efi/boot/bootx64.efi -p /boot/grub \
+			boot linux search normal configfile \
+			part_gpt btrfs fat iso9660 loopback \
+			test keystatus gfxmenu regexp probe \
+			efi_gop efi_uga all_video gfxterm font \
+			echo read help ls cat png jpeg halt reboot
 
 		cp -r grub $ZNX_DIR/boot
 
@@ -199,11 +172,11 @@ case $COMMAND in
 
 		if grep -q $DATA /proc/mounts; then
 			if mount -o bind $(grep $DATA /proc/mounts | cut -d ' ' -f 2) $ZNX_DIR; then
-				trap "umount -f $ZNX_DIR" EXIT HUP INT TERM
+				trap "cd; umount -f $ZNX_DIR" EXIT HUP INT TERM
 			fi
 		else
 			if mount $DATA $ZNX_DIR; then
-				trap "umount -f $ZNX_DIR" EXIT HUP INT TERM
+				trap "cd; umount -f $ZNX_DIR" EXIT HUP INT TERM
 			fi
 		fi
 
@@ -211,20 +184,18 @@ case $COMMAND in
 		mkdir -p $INSTALL_DIR
 
 		if [ -f $INSTALL_DIR/$FILE ]; then
-			if ! confirm "File $FILE is already installed. Do you want to overwrite it?"; then
-				abort "User aborted installation."
-			fi
+			error "\e[3${RANDOM:0:1}m$NAME\e[0m is already installed. You may want to update."
 		fi
 
 		if [ -f $TARGET ]; then
 			cp $TARGET $INSTALL_DIR
 		else
 			cd $INSTALL_DIR
-			zsync $TARGET
-			cd -
+			zsync ${QUIET:--q} $TARGET
+			cd > /dev/null
 		fi
 
-		echo "Successfully installed $NAME."
+		echo "Successfully installed \e[3${RANDOM:0:1}m$NAME\e[0m."
 
 	;;
 
@@ -234,22 +205,39 @@ case $COMMAND in
 
 	;;
 
+	rollback)
+
+		:
+
+	;;
+
+	clean)
+
+		:
+
+	;;
+
+	remove)
+
+		:
+
+	;;
+
 	list)
 
 		NAME=$1
-
 		DATA=$(findfs PARTLABEL=ZNX_DATA)
-
 		ZNX_DIR=/tmp/znx
+
 		mkdir -p $ZNX_DIR
 
 		if grep -q $DATA /proc/mounts; then
 			if mount -o bind $(grep $DATA /proc/mounts | cut -d ' ' -f 2) $ZNX_DIR; then
-				trap "umount -f $ZNX_DIR" EXIT HUP INT TERM
+				trap "cd; umount -f $ZNX_DIR" EXIT HUP INT TERM
 			fi
 		else
 			if mount $DATA $ZNX_DIR; then
-				trap "umount -f $ZNX_DIR" EXIT HUP INT TERM
+				trap "cd; umount -f $ZNX_DIR" EXIT HUP INT TERM
 			fi
 		fi
 
@@ -257,17 +245,11 @@ case $COMMAND in
 			error "Bad pattern passed."
 		fi
 
-		cd $ZNX_DIR
+		cd $ZNX_DIR/boot_images
 		for d in ${NAME:-*/*}; do
-			ls $d
+			echo "\e[3${RANDOM:0:1}m$d\e[0m"
 		done
-		cd -
-
-	;;
-
-	remove)
-
-		:
+		cd > /dev/null
 
 	;;
 
