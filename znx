@@ -58,7 +58,7 @@ Available commands are:
 - rollback IMAGE:
   Revert the specified image to the previous state.
 
-- clean IMGAE:
+- clean IMAGE:
   Remove all the historical images. Keep just the latest.
 
 You can, optionally, pass the 'no-confirm' option (as the
@@ -204,10 +204,11 @@ case $COMMAND in
 
 	update)
 
-		[ $# -ne 2 ] && error "Bad command: wrong number of arguments."
+		[ $# -eq 2 -o $# -eq 3 ] || error "Bad command: wrong number of arguments."
 
 		DEV=$1
 		IMAGE=$2
+		UPDATE_URL=$3
 
 		[ ! -b $DEV ] && error "Not a block device."
 
@@ -216,11 +217,13 @@ case $COMMAND in
 
 		cd $ZNX_DIR/boot_images/$IMAGE || error "$IMAGE is not installed."
 
-		UPDATE_URL=$(echo $(dd if=*.iso bs=1 seek=33651 count=512 2 > /dev/null))
+		[ ${#UPDATE_URL} -eq 0 ] && UPDATE_URL=$(echo $(dd if=*.iso bs=1 seek=33651 count=512 2 > /dev/null))
 
 		[ ${#UPDATE_URL} -eq 0 ] && error "No update information available for $IMAGE"
 
-		zsync $UPDATE_URL
+		zsync $UPDATE_URL && \
+			echo "Successfully updated $IMAGE."|| \
+			error "Can't update $IMAGE."
 
 	;;
 
