@@ -36,7 +36,6 @@ confirm () {
 	fi
 }
 
-
 HELP="
 Usage: znx [no-confirm] command args
 
@@ -46,7 +45,7 @@ Available commands are:
   Configures an initial setup on the disk. This should be
   done before attempting any other operation.
 
-- install IMAGE_CODENAME [ URL | PATH ]:
+- install IMAGE [ URL | PATH ]:
   Installs a new ISO file to the /boot_images directory of
   the specified device. The device must have been
   initialized.
@@ -56,10 +55,10 @@ Available commands are:
   The image name only accepts alphanumeric characters,
   hyphens and underscores, and, a single slash.
 
-- rollback IMAGE_CODENAME:
+- rollback IMAGE:
   Revert the specified image to the previous state.
 
-- clean IMGAE_CODENAME:
+- clean IMGAE:
   Remove all the historical images. Keep just the latest.
 
 You can, optionally, pass the 'no-confirm' option (as the
@@ -103,10 +102,12 @@ case $COMMAND in
 		fi
 
 		if ! confirm "ALL DATA ON $DEV WILL BE DESTROYED! CONTINUE?"; then
-			abort "Operation aborted by user. Leaving unit $DEV untouched."
+			abort "Operation aborted by user. Leaving $DEV untouched."
 		fi
 
-		dd if=/dev/zero bs=4096 count=4 of=$DEV
+		echo "Wiping $DEV. Please wait."
+		dd if=/dev/zero bs=4M of=$DEV ${QUIET:-status=progress}
+
 		sgdisk --zap-all $DEV || true
 		sgdisk --new=1:0:64M --typecode 1:EF00 --change-name 1:ZNX_BOOT $DEV
 		sgdisk --largest-new=2 --typecode 2:8300 --change-name 2:ZNX_DATA $DEV
@@ -157,12 +158,12 @@ case $COMMAND in
 
 		[ $# -ne 2 ] && error "Bad command: wrong number of arguments."
 
-		NAME=$1
+		IMAGE=$1
 		TARGET=$2
 		FILE=$(basename $TARGET)
 
-		if ! echo $NAME | grep -qE '^[[:alnum:]_-]+/[[:alnum:]_-]+$'; then
-			error "NAME must be in the form: '^[[:alnum:]_-]+/[[:alnum:]_-]+$'."
+		if ! echo $IMAGE | grep -qE '^[[:alnum:]_-]+/[[:alnum:]_-]+$'; then
+			error "IMAGE must match the regular expression format: '^[[:alnum:]_-]+/[[:alnum:]_-]+$'."
 		fi
 
 		DATA=$(findfs PARTLABEL=ZNX_DATA)
@@ -180,52 +181,114 @@ case $COMMAND in
 			fi
 		fi
 
-		INSTALL_DIR=$ZNX_DIR/boot_images/$NAME
+		INSTALL_DIR=$ZNX_DIR/boot_images/$IMAGE
 		mkdir -p $INSTALL_DIR
 
 		if [ -f $INSTALL_DIR/$FILE ]; then
-			error "\e[3${RANDOM:0:1}m$NAME\e[0m is already installed. You may want to update."
+			error "\e[32m$IMAGE\e[0m is already installed. You may want to update."
 		fi
 
 		if [ -f $TARGET ]; then
 			cp $TARGET $INSTALL_DIR
 		else
 			cd $INSTALL_DIR
-			zsync ${QUIET:--q} $TARGET
+			if ! zsync ${QUIET:--q} $TARGET; then
+				error "Can't acces to $TARGET."
+			fi
 			cd > /dev/null
 		fi
 
-		echo "Successfully installed \e[3${RANDOM:0:1}m$NAME\e[0m."
+		echo "Successfully installed \e[32m$IMAGE\e[0m."
 
 	;;
 
 	update)
 
-		:
+		[ $# -ne 2 ] && error "Bad command: wrong number of arguments."
+
+		DEV=$1
+		IMAGE=$2
+
+		[ ! -b $DEV ] && error "Not a block device."
+
+		ZNX_DIR=/tmp/znx
+		mkdir -p $ZNX_DIR
+
+		cd $ZNX_DIR/boot_images/$IMAGE || error "$IMAGE is not installed."
+
+		UPDATE_URL=$(echo $(dd if=*.iso bs=1 seek=33651 count=512 2 > /dev/null))
+
+		[ ${#UPDATE_URL} -eq 0 ] && error "No update information available for $IMAGE"
+
+		zsync $UPDATE_URL
 
 	;;
 
 	rollback)
 
-		:
+		[ $# -ne 2 ] && error "Bad command: wrong number of arguments."
+
+		DEV=$1
+		IMAGE=$2
+
+		[ ! -b $DEV ] && error "Not a block device."
+
+		ZNX_DIR=/tmp/znx
+		mkdir -p $ZNX_DIR
+
+		cd $ZNX_DIR/boot_images/$IMAGE || error "\e[32m$IMAGE\e[0m. is not installed."
+
+		mv *.zs-old *.iso && \
+			echo "Sucessfully performed rollback on $IMAGE." || \
+			error "Couldn't rollback $IMAGE."
 
 	;;
 
 	clean)
 
-		:
+		[ $# -ne 2 ] && error "Bad command: wrong number of arguments."
+
+		DEV=$1
+		IMAGE=$2
+
+		[ ! -b $DEV ] && error "Not a block device."
+
+		ZNX_DIR=/tmp/znx
+		mkdir -p $ZNX_DIR
+
+		cd $ZNX_DIR/boot_images/$IMAGE || error "\e[32m$IMAGE\e[0m. is not installed."
+
+		rm -rf *.zs-old && echo "Sucessfully cleaned $IMAGE."
 
 	;;
 
 	remove)
 
-		:
+		[ $# -ne 2 ] && error "Wrong number of parameters passed."
+
+		ZNX_DIR=/tmp/znx
+		mkdir -p $ZNX_DIR
+
+		DEV=$1
+
+		[ ! -b $DEV ] && error "Not a block device. Aborting."
+
+		if mount $DEV $ZNX_DIR; then
+			trap "umount -f $ZNX_DIR" EXIT HUP INT TERM
+		fi
+
+		[ ! -d $ZNX_DIR/boot_images/$IMAGE ] && error "$IMAGE is not installed."
+
+		if confirm "Do you really want to remove $IMAGE?"; then
+			rm -rf $ZNX_DIR/boot_images/$IMAGE
+			echo "Successfully removed \e[32m$IMAGE\e[0m."
+		fi
 
 	;;
 
 	list)
 
-		NAME=$1
+		IMAGE=$1
 		DATA=$(findfs PARTLABEL=ZNX_DATA)
 		ZNX_DIR=/tmp/znx
 
@@ -241,13 +304,13 @@ case $COMMAND in
 			fi
 		fi
 
-		if ! echo $NAME | grep -qE '^[[:alnum:]_-]*$|^$'; then
+		if ! echo $IMAGE | grep -qE '^[[:alnum:]_-]*$|^$'; then
 			error "Bad pattern passed."
 		fi
 
 		cd $ZNX_DIR/boot_images
-		for d in ${NAME:-*/*}; do
-			echo "\e[3${RANDOM:0:1}m$d\e[0m"
+		for d in ${IMAGE:-*/*}; do
+			echo "\e[36m$d\e[0m"
 		done
 		cd > /dev/null
 
