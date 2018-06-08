@@ -1,154 +1,122 @@
 #! /bin/sh
 
-# Exit on errors.
+COMMAND=$1
+DEVICE=$2
+IMAGE=$3
+URL=$4
+ZNX_DIR=/tmp/znx
 
-set -e
 
 # A bunch of handy functions.
 
 error () {
-	echo "\e[31mError:\e[0m $@" 1 >& 2
+	echo "znx: \e[31mError:\e[0m $@"
 	exit 1
 }
 
-abort () {
-	echo "$@"
-	exit 0
+_clean () {
+	cd /
+	while mountpoint -q $ZNX_DIR; do
+		umount -f $ZNX_DIR
+	done
+	rm -rf $ZNX_DIR
 }
 
-help () {
-	echo "$HELP"
+# Always clean $ZNX_DIR
+
+trap _clean EXIT HUP INT TERM
+
+
+_mount () {
+	for dev in $DEVICE*; do
+
+		blkid $dev | grep -q ZNX_DATA && {
+			grep -q $DEVICE /proc/mounts && \
+				mount -o bind $(grep $dev |cut -d ' ' -f 2) $ZNX_DIR || \
+				mount $dev $ZNX_DIR || \
+				error "Unable to mount $dev! Exiting now."
+		}
+
+	done
+
+	mountpoint -q $ZNX_DIR || \
+		error "Device isn't being managed by znx. You must initialize it first."
+
 }
 
-confirm () {
-	if [ "$NOCONFIRM" == "SET" ]; then
-		ANSWER=y
-	else
-		echo -n "$@ (y/n) "
-		read -n 1 ANSWER
-		echo
-	fi
 
-	if [ "$ANSWER" == "y" ]; then
-		return 0
-	else
-		return 1
-	fi
-}
+# Sanity checks.
 
-HELP="
-Usage: znx [no-confirm] command args
+[ $# -eq 0 ] && \
+	error "No command given!"
 
-Available commands are:
+[ $(id -u) -ne 0 ] && \
+	error "You are not the super user."
 
-- init DEVICE:
-  Configures an initial setup on the disk. This should be
-  done before attempting any other operation.
+[ ! -b $DEVICE ] && \
+	error "$DEVICE is not a block device"
 
-- install IMAGE [ URL | PATH ]:
-  Installs a new ISO file to the /boot_images directory of
-  the specified device. The device must have been
-  initialized.
-  Each image must me assigned a name. If no name
-  is specified, the operation is aborted. Name it
-  in a way that makes sense to you.
-  The image name only accepts alphanumeric characters,
-  hyphens and underscores, and, a single slash.
+echo $DEVICE | grep -q '[0-9]' && \
+	error "Please provide a block device name, not a partition."
 
-- rollback IMAGE:
-  Revert the specified image to the previous state.
 
-- clean IMAGE:
-  Remove all the historical images. Keep just the latest.
+# Prepare the temporary directory.
 
-You can, optionally, pass the 'no-confirm' option (as the
-first argument) to make znx accept every default option.
-This is useful when calling from another script or when
-not running interactively."
+mkdir -p $ZNX_DIR
 
-# == MAIN.
 
-[ $# -lt 1 ] && error "No command given!"
-[ $(id -u) -ne 0 ] && error "You are not the super user."
-
-if [ $(pgrep -c znx) -gt 1 ]; then
-	error "znx is already running. Aborting."
-fi
-
-if [ "$1" == "no-confirm" ]; then
-	NOCONFIRM=SET
-	QUIET=SET
-	shift
-fi
-
-COMMAND=$1
-shift
+# Perform the right action.
 
 case $COMMAND in
 
 	init)
 
-		ZNX_DIR=/tmp/znx
-		mkdir -p $ZNX_DIR
+		[ $# -ne 2 ] && \
+			error "Bad command: wrong number of arguments."
 
-		[ $# -lt 1 ] && error "No device name given!"
-		[ $# -gt 2 ] && error "Bad command: wrong number of arguments."
-		[ ! -b $1 ] && error "Not a block device. Aborting."
-
-		DEV=$(echo $1 | sed 's/[0-9]//g')
-
-		if mount | grep -q $DEV; then
+		grep -q $DEVICE /proc/mounts && \
 			error "Device is mounted! Unmount it before continuing."
-		fi
 
-		if ! confirm "ALL DATA ON $DEV WILL BE DESTROYED! CONTINUE?"; then
-			abort "Operation aborted by user. Leaving $DEV untouched."
-		fi
+		echo "Wiping $DEVICE. Please wait."
+		sgdisk -o $DEVICE
+		sgdisk -n 1:0:32M -t 1:EF00 -c 1:ZNX_BOOT $DEVICE
+		sgdisk -N 2 -t 2:8300 -c 2:ZNX_DATA $DEVICE
 
-		echo "Wiping $DEV. Please wait."
-		dd if=/dev/zero bs=4M of=$DEV ${QUIET:-status=progress}
+		for dev in $DEVICE*; do
 
-		sgdisk --zap-all $DEV || true
-		sgdisk --new=1:0:64M --typecode 1:EF00 --change-name 1:ZNX_BOOT $DEV
-		sgdisk --largest-new=2 --typecode 2:8300 --change-name 2:ZNX_DATA $DEV
+			# Prepare the boot partition.
 
-		BOOT=$(findfs PARTLABEL=ZNX_BOOT)
-		DATA=$(findfs PARTLABEL=ZNX_DATA)
+			blkid $dev | grep -q ZNX_BOOT && {
+				mkfs.vfat $dev
+				mount $dev $ZNX_DIR || \
+					error "Unable to mount $dev! Can't continue."
 
-		mkfs.vfat $BOOT
-		mkfs.btrfs -qf $DATA
+				mkdir -p $ZNX_DIR/efi/boot
+				mkdir -p $ZNX_DIR/boot
 
-		if mount $BOOT $ZNX_DIR; then
-			trap "umount -f $ZNX_DIR" EXIT HUP INT TERM
-		else
-			error "Unable to mount $BOOT! Can't continue."
-		fi
+				grub-mkimage -C xz -O x86_64-efi -o $ZNX_DIR/efi/boot/bootx64.efi -p /boot/grub \
+					boot linux search normal configfile \
+					part_gpt btrfs fat iso9660 loopback \
+					test keystatus gfxmenu regexp probe \
+					efi_gop efi_uga all_video gfxterm font \
+					echo read help ls cat png jpeg halt reboot
 
-		mkdir -p $ZNX_DIR/efi/boot
-		mkdir -p $ZNX_DIR/boot
+				cp -r grub $ZNX_DIR/boot
+			}
 
-		grub-mkimage -C xz -O x86_64-efi -o $ZNX_DIR/efi/boot/bootx64.efi -p /boot/grub \
-			boot linux search normal configfile \
-			part_gpt btrfs fat iso9660 loopback \
-			test keystatus gfxmenu regexp probe \
-			efi_gop efi_uga all_video gfxterm font \
-			echo read help ls cat png jpeg halt reboot
+			# Prepare the data partition.
 
-		cp -r grub $ZNX_DIR/boot
+			blkid $dev | grep -q ZNX_DATA && {
+				mkfs.btrfs -qf $dev
+				mount $dev $ZNX_DIR || \
+					error "Unable to mount $DATA! Exiting now."
 
-		umount -f $ZNX_DIR
+				mkdir -p $ZNX_DIR/boot_images
+				mkdir -p $ZNX_DIR/apps
+				mkdir -p $ZNX_DIR/data
+			}
 
-		if mount $DATA $ZNX_DIR; then
-			trap "umount -f $ZNX_DIR" EXIT HUP INT TERM
-		else
-			error "Unable to mount $DATA! Exiting now."
-		fi
-
-		mkdir -p $ZNX_DIR/boot_images
-		mkdir -p $ZNX_DIR/apps
-		mkdir -p $ZNX_DIR/data
-
-		umount -f $ZNX_DIR
+		done
 
 		echo "Operation successful. Device is ready."
 
@@ -156,92 +124,60 @@ case $COMMAND in
 
 	install)
 
-		[ $# -ne 2 ] && error "Bad command: wrong number of arguments."
+		[ $# -ne 4 ] && \
+			error "Bad command: wrong number of arguments."
 
-		IMAGE=$1
-		TARGET=$2
-		FILE=$(basename $TARGET)
-
-		if ! echo $IMAGE | grep -qE '^[[:alnum:]_-]+/[[:alnum:]_-]+$'; then
+		echo $IMAGE | grep -qE '^[[:alnum:]_-]+/[[:alnum:]_-]+$' || \
 			error "IMAGE must match the regular expression format: '^[[:alnum:]_-]+/[[:alnum:]_-]+$'."
-		fi
 
-		DATA=$(findfs PARTLABEL=ZNX_DATA)
+		_mount
+		mkdir -p $ZNX_DIR/boot_images/$IMAGE
 
-		ZNX_DIR=/tmp/znx
-		mkdir -p $ZNX_DIR
-
-		if grep -q $DATA /proc/mounts; then
-			if mount -o bind $(grep $DATA /proc/mounts | cut -d ' ' -f 2) $ZNX_DIR; then
-				trap "cd; umount -f $ZNX_DIR" EXIT HUP INT TERM
-			fi
-		else
-			if mount $DATA $ZNX_DIR; then
-				trap "cd; umount -f $ZNX_DIR" EXIT HUP INT TERM
-			fi
-		fi
-
-		INSTALL_DIR=$ZNX_DIR/boot_images/$IMAGE
-		mkdir -p $INSTALL_DIR
-
-		if [ -f $INSTALL_DIR/$FILE ]; then
-			error "\e[32m$IMAGE\e[0m is already installed. You may want to update."
-		fi
-
-		if [ -f $TARGET ]; then
-			cp $TARGET $INSTALL_DIR
-		else
-			cd $INSTALL_DIR
-			if ! zsync ${QUIET:--q} $TARGET; then
-				error "Can't acces to $TARGET."
-			fi
-			cd > /dev/null
-		fi
-
-		echo "Successfully installed \e[32m$IMAGE\e[0m."
+		echo "Installing $IMAGE."
+		cp -u $URL $ZNX_DIR/boot_images/$IMAGE || {
+			cd $ZNX_DIR/boot_images/$IMAGE && \
+				zsync -q $URL
+			echo "Successfully installed \e[32m$IMAGE\e[0m." 
+		} || {
+			rm -rf $ZNX_DIR/boot_images/$IMAGE && \
+				error "Failed to access $URL."
+		}
 
 	;;
 
 	update)
 
-		[ $# -eq 2 -o $# -eq 3 ] || error "Bad command: wrong number of arguments."
+		[ $# -eq 3 -o $# -eq 4 ] || \
+			error "Bad command: wrong number of arguments."
 
-		DEV=$1
-		IMAGE=$2
-		UPDATE_URL=$3
+		_mount
+		cd $ZNX_DIR/boot_images/$IMAGE || \
+			error "$IMAGE is not installed."
 
-		[ ! -b $DEV ] && error "Not a block device."
+		echo "Updating $IMAGE."
+		UPDATE_URL=$(echo $(dd if=*.iso bs=1 seek=33651 count=512 2 > /dev/null))
 
-		ZNX_DIR=/tmp/znx
-		mkdir -p $ZNX_DIR
-
-		cd $ZNX_DIR/boot_images/$IMAGE || error "$IMAGE is not installed."
-
-		[ ${#UPDATE_URL} -eq 0 ] && UPDATE_URL=$(echo $(dd if=*.iso bs=1 seek=33651 count=512 2 > /dev/null))
-
-		[ ${#UPDATE_URL} -eq 0 ] && error "No update information available for $IMAGE"
-
-		zsync $UPDATE_URL && \
-			echo "Successfully updated $IMAGE."|| \
-			error "Can't update $IMAGE."
+		cd $ZNX_DIR/boot_images/$IMAGE && {
+			zsync -q ${UPDATE_URL:-$URL} && \
+				echo "Successfully updated $IMAGE."
+		} || {
+			error "Failed to access $URL."
+		}
 
 	;;
 
 	rollback)
 
-		[ $# -ne 2 ] && error "Bad command: wrong number of arguments."
+		[ $# -ne 3 ] && \
+			error "Bad command: wrong number of arguments."
 
-		DEV=$1
-		IMAGE=$2
+		_mount
+		cd $ZNX_DIR/boot_images/$IMAGE || \
+			error "$IMAGE is not installed."
 
-		[ ! -b $DEV ] && error "Not a block device."
+		echo "Performing rollback on $IMAGE."
 
-		ZNX_DIR=/tmp/znx
-		mkdir -p $ZNX_DIR
-
-		cd $ZNX_DIR/boot_images/$IMAGE || error "\e[32m$IMAGE\e[0m. is not installed."
-
-		mv *.zs-old *.iso && \
+		mv -f *.zs-old *.iso && \
 			echo "Sucessfully performed rollback on $IMAGE." || \
 			error "Couldn't rollback $IMAGE."
 
@@ -249,85 +185,42 @@ case $COMMAND in
 
 	clean)
 
-		[ $# -ne 2 ] && error "Bad command: wrong number of arguments."
+		[ $# -ne 3 ] && \
+			error "Bad command: wrong number of arguments."
 
-		DEV=$1
-		IMAGE=$2
+		_mount
+		cd $ZNX_DIR/boot_images/$IMAGE || \
+			error "$IMAGE is not installed,"
 
-		[ ! -b $DEV ] && error "Not a block device."
-
-		ZNX_DIR=/tmp/znx
-		mkdir -p $ZNX_DIR
-
-		cd $ZNX_DIR/boot_images/$IMAGE || error "\e[32m$IMAGE\e[0m. is not installed."
-
-		rm -rf *.zs-old && echo "Sucessfully cleaned $IMAGE."
+		rm -rf *.zs-old && \
+			echo "Sucessfully cleaned $IMAGE."
 
 	;;
 
 	remove)
 
-		[ $# -ne 2 ] && error "Wrong number of parameters passed."
+		[ $# -ne 3 ] && \
+			error "Wrong number of parameters passed."
 
-		ZNX_DIR=/tmp/znx
-		mkdir -p $ZNX_DIR
+		_mount
+		cd $ZNX_DIR/boot_images/$IMAGE || \
+			error "$IMAGE is not installed."
 
-		DEV=$1
-
-		[ ! -b $DEV ] && error "Not a block device. Aborting."
-
-		if mount $DEV $ZNX_DIR; then
-			trap "umount -f $ZNX_DIR" EXIT HUP INT TERM
-		fi
-
-		[ ! -d $ZNX_DIR/boot_images/$IMAGE ] && error "$IMAGE is not installed."
-
-		if confirm "Do you really want to remove $IMAGE?"; then
-			rm -rf $ZNX_DIR/boot_images/$IMAGE
+		rm -rf $ZNX_DIR/boot_images/$IMAGE && \
 			echo "Successfully removed \e[32m$IMAGE\e[0m."
-		fi
 
 	;;
 
 	list)
 
-		IMAGE=$1
-		DATA=$(findfs PARTLABEL=ZNX_DATA)
-		ZNX_DIR=/tmp/znx
-
-		mkdir -p $ZNX_DIR
-
-		if grep -q $DATA /proc/mounts; then
-			if mount -o bind $(grep $DATA /proc/mounts | cut -d ' ' -f 2) $ZNX_DIR; then
-				trap "cd; umount -f $ZNX_DIR" EXIT HUP INT TERM
-			fi
-		else
-			if mount $DATA $ZNX_DIR; then
-				trap "cd; umount -f $ZNX_DIR" EXIT HUP INT TERM
-			fi
-		fi
-
-		if ! echo $IMAGE | grep -qE '^[[:alnum:]_-]*$|^$'; then
-			error "Bad pattern passed."
-		fi
-
+		_mount
 		cd $ZNX_DIR/boot_images
+
 		for d in ${IMAGE:-*/*}; do
 			echo "\e[36m$d\e[0m"
 		done
-		cd > /dev/null
 
 	;;
 
-	help)
-
-		help
-
-	;;
-
-	*)
-
-		error "No such command $COMMAND"
-
-	;;
+	*) error "No such command '$COMMAND'.";;
 esac
