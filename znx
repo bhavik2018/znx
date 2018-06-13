@@ -132,12 +132,12 @@ case $COMMAND in
 			error "IMAGE must match the regular expression format: '^[[:alnum:]_-]+/[[:alnum:]_-]+$'."
 
 		_mount
-		mkdir -p $ZNX_DIR/boot_images/$IMAGE
 
 		echo "Installing $IMAGE."
 
 		[ -d $ZNX_DIR/boot_images/$IMAGE ] && \
-			error "Installation aborted: $IMAGE is already installed."
+			error "Installation aborted: $IMAGE is already installed." || \
+			mkdir -p $ZNX_DIR/boot_images/$IMAGE
 
 		cp -u $URL $ZNX_DIR/boot_images/$IMAGE || {
 			cd $ZNX_DIR/boot_images/$IMAGE && \
