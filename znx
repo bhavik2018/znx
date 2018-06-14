@@ -124,12 +124,11 @@ case $COMMAND in
 
 	install)
 
-		set -x
 		[ $# -ne 4 ] && \
 			error "Bad command: wrong number of arguments."
 
 		echo $IMAGE | grep -qE '^[[:alnum:]_-]+/[[:alnum:]_-]+$' || \
-			error "IMAGE must match the regular expression format: '^[[:alnum:]_-]+/[[:alnum:]_-]+$'."
+			error "IMAGE must match the extended regular expression: '^[[:alnum:]_-]+/[[:alnum:]_-]+$'."
 
 		_mount
 
