@@ -7,6 +7,8 @@ URL=$4
 ZNX_DIR=/tmp/znx
 
 
+set -e
+
 # A bunch of handy functions.
 
 error () {
