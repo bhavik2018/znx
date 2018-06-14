@@ -122,7 +122,7 @@ case $COMMAND in
 
 	;;
 
-	install)
+	deploy)
 
 		[ $# -ne 4 ] && \
 			error "Bad command: wrong number of arguments."
@@ -132,16 +132,16 @@ case $COMMAND in
 
 		_mount
 
-		echo "Installing $IMAGE."
+		echo "Deploying $IMAGE."
 
 		[ -d $ZNX_DIR/boot_images/$IMAGE ] && \
-			error "Installation aborted: $IMAGE is already installed." || \
+			error "Deployment aborted: $IMAGE is already deployed." || \
 			mkdir -p $ZNX_DIR/boot_images/$IMAGE
 
 		cp -u $URL $ZNX_DIR/boot_images/$IMAGE || {
 			cd $ZNX_DIR/boot_images/$IMAGE && \
 				zsync -q $URL
-			echo "Successfully installed \e[32m$IMAGE\e[0m." 
+			echo "Successfully deployed \e[32m$IMAGE\e[0m." 
 		} || {
 			rm -rf $ZNX_DIR/boot_images/$IMAGE && \
 				error "Failed to access $URL."
@@ -156,7 +156,7 @@ case $COMMAND in
 
 		_mount
 		cd $ZNX_DIR/boot_images/$IMAGE || \
-			error "$IMAGE is not installed."
+			error "$IMAGE is not deployed."
 
 		echo "Updating $IMAGE."
 		UPDATE_URL=$(echo $(dd if=*.iso bs=1 seek=33651 count=512 2 > /dev/null))
@@ -177,7 +177,7 @@ case $COMMAND in
 
 		_mount
 		cd $ZNX_DIR/boot_images/$IMAGE || \
-			error "$IMAGE is not installed."
+			error "$IMAGE is not deployed."
 
 		echo "Performing rollback on $IMAGE."
 
@@ -194,7 +194,7 @@ case $COMMAND in
 
 		_mount
 		cd $ZNX_DIR/boot_images/$IMAGE || \
-			error "$IMAGE is not installed,"
+			error "$IMAGE is not deployed,"
 
 		rm -rf *.zs-old && \
 			echo "Sucessfully cleaned $IMAGE."
@@ -208,7 +208,7 @@ case $COMMAND in
 
 		_mount
 		cd $ZNX_DIR/boot_images/$IMAGE || \
-			error "$IMAGE is not installed."
+			error "$IMAGE is not deployed."
 
 		rm -rf $ZNX_DIR/boot_images/$IMAGE && \
 			echo "Successfully removed \e[32m$IMAGE\e[0m."
