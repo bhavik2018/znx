@@ -1,9 +1,4 @@
-title-text:  "pick a poison"
-title-color: "#ffffff"
-
 desktop-color: "#303030"
-
-terminal-box : "terminal_box_*.png"
 
 + boot_menu {
 	left = 5%
@@ -28,7 +23,6 @@ terminal-box : "terminal_box_*.png"
 	scrollbar_thumb = "slider_*.png"
 }
 
-# INSTRUCTION IMAGE
 + image {
 	top = 100%-90
 	left = 5%
@@ -37,7 +31,6 @@ terminal-box : "terminal_box_*.png"
 	file = "info.png"
 }
 
-# PROGRESS BAR
 + progress_bar {
 	id = "__timeout__"
 	left = 5%
